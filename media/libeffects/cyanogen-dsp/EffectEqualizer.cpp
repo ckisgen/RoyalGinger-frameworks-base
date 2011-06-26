@@ -61,17 +61,16 @@ static int64_t toFixedPoint(float in) {
 }
 
 EffectEqualizer::EffectEqualizer()
+    : mLoudnessAdjustment(10000.f), mLoudness(50.f), mNextUpdate(0), mNextUpdateInterval(1000), mPowerSquared(0)
 {
     for (int32_t i = 0; i < 5; i ++) {
         mBand[i] = 0;
     }
-    refreshBands();
 }
 
 int32_t EffectEqualizer::command(uint32_t cmdCode, uint32_t cmdSize, void* pCmdData, uint32_t* replySize, void* pReplyData)
 {
 	if (cmdCode == EFFECT_CMD_CONFIGURE) {
-		LOGI("EFFECT_CMD_CONFIGURE");
 		int32_t ret = Effect::configure(pCmdData);
 		if (ret != 0) {
 			LOGE("EFFECT_CMD_CONFIGURE failed");
@@ -80,21 +79,21 @@ int32_t EffectEqualizer::command(uint32_t cmdCode, uint32_t cmdSize, void* pCmdD
 			return 0;
 		}
 
-		refreshBands();
+                /* Weigher for estimating bass compensation. */
+                mWeigher.setBandPass(2200.0, mSamplingRate, 0.33);
+                /* 100 updates per second. */
+                mNextUpdateInterval = int32_t(mSamplingRate / 100.);
 
 		int32_t *replyData = (int32_t *) pReplyData;
 		*replyData = 0;
-		LOGI("EFFECT_CMD_CONFIGURE OK");
 		return 0;
-    }
+	}
 
-    if (cmdCode == EFFECT_CMD_GET_PARAM) {
+	if (cmdCode == EFFECT_CMD_GET_PARAM) {
 		effect_param_t *cep = (effect_param_t *) pCmdData;
-		LOGI("EFFECT_CMD_GET_PARAM + %d bytes of param", cep->psize);
 		if (cep->psize == 4) {
-			int cmd = ((int *) cep)[3];
+			int32_t cmd = ((int32_t *) cep)[3];
 			if (cmd == EQ_PARAM_NUM_BANDS) {
-				LOGI("Requested param: EQ_PARAM_NUM_BANDS");
 				reply1x4_1x2_t *replyData = (reply1x4_1x2_t *) pReplyData;
 				replyData->status = 0;
 				replyData->vsize = 2;
@@ -104,7 +103,6 @@ int32_t EffectEqualizer::command(uint32_t cmdCode, uint32_t cmdSize, void* pCmdD
 				return 0;
 			}
 			if (cmd == EQ_PARAM_LEVEL_RANGE) {
-				LOGI("Requested param: EQ_PARAM_LEVEL_RANGE");
 				reply1x4_2x2_t *replyData = (reply1x4_2x2_t *) pReplyData;
 				replyData->status = 0;
 				replyData->vsize = 4;
@@ -115,19 +113,16 @@ int32_t EffectEqualizer::command(uint32_t cmdCode, uint32_t cmdSize, void* pCmdD
 				return 0;
 			}
 			if (cmd == EQ_PARAM_GET_NUM_OF_PRESETS) {
-				LOGI("Requested param: EQ_PARAM_GET_NUM_OF_PRESETS");
 				reply1x4_1x2_t *replyData = (reply1x4_1x2_t *) pReplyData;
 				replyData->status = 0;
 				replyData->vsize = 2;
 				replyData->data = 0;
 				*replySize = sizeof(reply1x4_1x2_t);
-				LOGI("EQ_PARAM_GET_NUM_OF_PRESETS OK");
 				return 0;
 			}
 		} else if (cep->psize == 8) {
-			int cmd = ((int *) cep)[3];
-			int arg = ((int *) cep)[4];
-			LOGI("Requested param: %d, %d", cmd, arg);
+			int32_t cmd = ((int32_t *) cep)[3];
+			int32_t arg = ((int32_t *) cep)[4];
 			if (cmd == EQ_PARAM_BAND_LEVEL && arg >= 0 && arg < 5) {
 				reply2x4_1x2_t *replyData = (reply2x4_1x2_t *) pReplyData;
 				replyData->status = 0;
@@ -158,8 +153,18 @@ int32_t EffectEqualizer::command(uint32_t cmdCode, uint32_t cmdSize, void* pCmdD
 
 	if (cmdCode == EFFECT_CMD_SET_PARAM) {
 		effect_param_t *cep = (effect_param_t *) pCmdData;
-		LOGI("EFFECT_CMD_SET_PARAM, %d", cep->psize);
 		int32_t *replyData = (int32_t *) pReplyData;
+
+		if (cep->psize == 6) {
+			int32_t cmd = ((int32_t *) cep)[3];
+			if (cmd == CUSTOM_EQ_PARAM_LOUDNESS_CORRECTION) {
+				int16_t value = ((int16_t *) cep)[8];
+				mLoudnessAdjustment = value / 100.0f;
+				LOGI("Setting loudness correction reference to %f dB", mLoudnessAdjustment);
+				*replyData = 0;
+				return 0;
+			}
+		}
 
 		if (cep->psize == 8) {
 			int32_t cmd = ((int32_t *) cep)[3];
@@ -170,7 +175,6 @@ int32_t EffectEqualizer::command(uint32_t cmdCode, uint32_t cmdSize, void* pCmdD
 				*replyData = 0;
 				int16_t value = ((int16_t *) cep)[10];
 				mBand[arg] = value / 100.0f;
-				refreshBands();
 				return 0;
 			}
 		}
@@ -180,15 +184,53 @@ int32_t EffectEqualizer::command(uint32_t cmdCode, uint32_t cmdSize, void* pCmdD
 		return 0;
 	}
 
-     return Effect::command(cmdCode, cmdSize, pCmdData, replySize, pReplyData);
+	return Effect::command(cmdCode, cmdSize, pCmdData, replySize, pReplyData);
+}
+
+/* Source material: ISO 226:2003 curves.
+ *
+ * On differencing 100 dB curves against 80 dB, 60 dB, 40 dB and 20 dB, a pattern
+ * can be established where each loss of 20 dB of power in signal suggests gradually
+ * decreasing ear sensitivity, until the bottom is reached at 20 dB SPL where no more
+ * boosting is required. Measurements end at 100 dB, which is assumed to be the reference
+ * sound pressure level.
+ *
+ * The boost can be calculated as linear scaling of the following adjustment:
+ *     20 Hz +40 dB (unmodeled)
+ *   62.5 Hz +20 dB
+ *    250 Hz  +8 dB
+ *   1000 Hz   0 dB
+ *   4000 Hz  -3 dB
+ *  16000 Hz  +6 dB
+ *
+ * The boost will be applied maximally for signals of 20 dB and less,
+ * and linearly decreased for signals 20 dB ... 100 dB, and no adjustment is
+ * made for 100 dB or higher. User must configure a reference level that maps the
+ * digital sound level against the audio.
+ */
+float EffectEqualizer::getAdjustedBand(int32_t band) {
+    const float adj[5] = { 20.0, 8.0, 0.0, -3.0, 6.0 };
+
+    float loudnessLevel = mLoudness + mLoudnessAdjustment;
+    if (loudnessLevel > 100.f) {
+        loudnessLevel = 100.f;
+    }
+    if (loudnessLevel < 20.f) {
+        loudnessLevel = 20.f;
+    }
+
+    loudnessLevel = (loudnessLevel - 20) / (100.0 - 20.0);
+
+    /* Maximum loudness = no adj (reference behavior at 100 dB) */
+    return mBand[band] + adj[band] * (1. - loudnessLevel);
 }
 
 void EffectEqualizer::refreshBands()
 {
-    mGain = toFixedPoint(powf(10.0f, mBand[0] / 20.0f));
-    for (int band = 0; band < 4; band ++) {
+    mGain = toFixedPoint(powf(10.0f, getAdjustedBand(0) / 20.0f));
+    for (int32_t band = 0; band < 4; band ++) {
         float centerFrequency = 62.5f * powf(4, band);
-        float dB = mBand[band+1] - mBand[band];
+        float dB = getAdjustedBand(band+1) - getAdjustedBand(band);
 
         mFilterL[band].setHighShelf(centerFrequency * 2.0f, mSamplingRate, dB, 1.0f);
         mFilterR[band].setHighShelf(centerFrequency * 2.0f, mSamplingRate, dB, 1.0f);
@@ -198,8 +240,34 @@ void EffectEqualizer::refreshBands()
 int32_t EffectEqualizer::process_effect(audio_buffer_t *in, audio_buffer_t *out)
 {
     for (uint32_t i = 0; i < in->frameCount; i ++) {
+        if (mNextUpdate == 0) {
+            float signalPowerDb = logf(mPowerSquared / mNextUpdateInterval / float(int64_t(1) << 48) + 1e-10f) / logf(10.0f) * 10.0f;
+            signalPowerDb += 96.0f + 10.0f;
+
+            /* Limit automatic EQ to sub-dB adjustments to limit the noise
+             * introduced by updates. */
+            if (mLoudness < signalPowerDb - .5) {
+                mLoudness += .5;
+            } else if (mLoudness > signalPowerDb + .5) {
+                mLoudness -= .5;
+            } else {
+                mLoudness = signalPowerDb;
+            }
+
+            /* Update EQ. */
+            refreshBands();
+
+            mNextUpdate = mNextUpdateInterval;
+            mPowerSquared = 0;
+        }
+        mNextUpdate --;
+
         int32_t tmpL = read(in, i * 2);
         int32_t tmpR = read(in, i * 2 + 1);
+
+        /* Calculate signal loudness estimate */
+        int64_t weight = mWeigher.process(tmpL + tmpR);
+        mPowerSquared += weight * weight;
      
         /* first "shelve" is just gain */ 
         tmpL = tmpL * mGain >> 32;
