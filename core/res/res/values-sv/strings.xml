@@ -152,6 +152,9 @@
     <string name="recent_tasks_title" msgid="3691764623638127888">"Senaste"</string>
     <string name="no_recent_tasks" msgid="279702952298056674">"Inga nya appar."</string>
     <string name="global_actions" msgid="2406416831541615258">"Telefonalternativ"</string>
+    <string name="global_action_home">Hem</string>
+    <string name="global_action_menu">Meny</string>
+    <string name="global_action_back">Tillbaka</string>
     <string name="global_action_lock" msgid="2844945191792119712">"Skärmlås"</string>
     <string name="global_action_power_off" msgid="4471879440839879722">"Stäng av"</string>
     <string name="global_action_reboot">Starta om</string>
@@ -735,6 +738,7 @@
     <string name="elapsed_time_short_format_mm_ss" msgid="4431555943828711473">"<xliff:g id="MINUTES">%1$02d</xliff:g>:<xliff:g id="SECONDS">%2$02d</xliff:g>"</string>
     <string name="elapsed_time_short_format_h_mm_ss" msgid="1846071997616654124">"<xliff:g id="HOURS">%1$d</xliff:g>:<xliff:g id="MINUTES">%2$02d</xliff:g>:<xliff:g id="SECONDS">%3$02d</xliff:g>"</string>
     <string name="selectAll" msgid="6876518925844129331">"Välj alla"</string>
+    <string name="copyAll">Kopiera alla</string>
     <string name="selectText" msgid="4862359311088898878">"Välj ord"</string>
     <string name="cut" msgid="3092569408438626261">"Klipp ut"</string>
     <string name="copy" msgid="2681946229533511987">"Kopiera"</string>
